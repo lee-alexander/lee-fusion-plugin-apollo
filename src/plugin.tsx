@@ -14,16 +14,17 @@ import {
   ApolloBodyParserConfigToken,
   ApolloDefaultOptionsConfigToken,
 } from './tokens';
+import {graphqlUploadKoa} from 'graphql-upload';
 
 export type DepsType = {
-  RouteTags: typeof RouteTagsToken,
-  logger: typeof LoggerToken.optional,
-  schema: typeof GraphQLSchemaToken.optional,
-  endpoint: typeof GraphQLEndpointToken.optional,
-  getApolloClient: typeof ApolloClientToken,
-  getDataFromTree: typeof GetDataFromTreeToken.optional,
-  bodyParserConfig: typeof ApolloBodyParserConfigToken.optional,
-  defaultOptionsConfig: typeof ApolloDefaultOptionsConfigToken.optional,
+  RouteTags: typeof RouteTagsToken;
+  logger: typeof LoggerToken.optional;
+  schema: typeof GraphQLSchemaToken.optional;
+  endpoint: typeof GraphQLEndpointToken.optional;
+  getApolloClient: typeof ApolloClientToken;
+  getDataFromTree: typeof GetDataFromTreeToken.optional;
+  bodyParserConfig: typeof ApolloBodyParserConfigToken.optional;
+  defaultOptionsConfig: typeof ApolloDefaultOptionsConfigToken.optional;
 };
 
 declare let __NODE__: boolean;
@@ -85,9 +86,7 @@ export default (renderFn: Render) =>
         }
         // Create the client and apollo provider
         const client = getApolloClient(ctx, initialState);
-        ctx.element = (
-          <ApolloProvider client={client}>{ctx.element}</ApolloProvider>
-        );
+        ctx.element = <ApolloProvider client={client}>{ctx.element}</ApolloProvider>;
 
         await next();
 
@@ -105,43 +104,57 @@ export default (renderFn: Render) =>
         }
       };
       if (__NODE__ && schema) {
-        const server = new ApolloServer({
-          formatError: error => {
-            logger && logger.error(error.message, error);
-            return error;
-          },
-          ...defaultOptionsConfig,
-          schema,
-          // investigate other options
-          context: ({ctx}) => {
-            return ctx;
-          },
-          executor: async requestContext => {
-            const fusionCtx = requestContext.context as Context;
-            const routeTags = RouteTags.from(fusionCtx);
-            routeTags.name = 'graphql';
-            const client = getApolloClient(fusionCtx, {});
-            const queryObservable = (client as any).queryManager.getObservableFromLink(
-              requestContext.document,
-              fusionCtx,
-              requestContext.request.variables
-            );
-            return new Promise((resolve, reject) => {
-              queryObservable.subscribe({
-                next(x) {
-                  resolve(x);
-                },
-                error(err) {
-                  reject(err);
-                },
+        async function createApolloMiddleware() {
+          const server = new ApolloServer({
+            formatError: error => {
+              logger && logger.error(error.message, error);
+              return error;
+            },
+            ...defaultOptionsConfig,
+            schema,
+            // investigate other options
+            context: ({ctx}) => {
+              return ctx as any;
+            },
+            executor: async requestContext => {
+              const fusionCtx = requestContext.context as Context;
+              const routeTags = RouteTags.from(fusionCtx);
+              routeTags.name = 'graphql';
+              const client = getApolloClient(fusionCtx, {});
+              const queryObservable = (client as any).queryManager.getObservableFromLink(
+                requestContext.document,
+                fusionCtx,
+                requestContext.request.variables
+              );
+              return new Promise((resolve, reject) => {
+                queryObservable.subscribe({
+                  next(x) {
+                    resolve(x);
+                  },
+                  error(err) {
+                    reject(err);
+                  },
+                });
               });
-            });
+            },
+          });
+          await server.start();
+          return server.getMiddleware({
+            path: endpoint,
+            bodyParserConfig: bodyParserConfig as any,
+          });
+        }
+
+        let apolloMiddleware: (ctx: Context, next: () => Promise<void>) => Promise<void>;
+
+        return compose([
+          graphqlUploadKoa(),
+          async (ctx: Context, next) => {
+            apolloMiddleware = apolloMiddleware ?? (await createApolloMiddleware());
+            return await apolloMiddleware(ctx, next);
           },
-        });
-        return compose([server.getMiddleware({
-          path: endpoint,
-          bodyParserConfig: bodyParserConfig as any
-        }), renderMiddleware]);
+          renderMiddleware,
+        ]) as any;
       } else {
         return renderMiddleware;
       }
